@@ -1,0 +1,80 @@
+name: Deploy main (Produção)
+run-name: Deploy da main por @${{ github.actor }}
+
+# Somente acionamento manual pela aba Actions
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build e Deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: producao
+      url: ${{ steps.publicar.outputs.url }}
+    steps:
+      # A branch publicada é fixa, independente de onde o workflow foi disparado
+      - name: Checkout da branch main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Validar o sistema
+        run: |
+          test -s index.html || { echo "::error::index.html ausente ou vazio"; exit 1; }
+          grep -qi "<title>" index.html || { echo "::error::index.html sem <title>"; exit 1; }
+
+      # Usa o commit realmente baixado (não o da branch de onde o workflow foi disparado)
+      - name: Gerar artefato
+        run: |
+          COMMIT=$(git rev-parse --short HEAD)
+          mkdir -p dist
+          cp index.html dist/
+          sed -i "s/__COMMIT__/${COMMIT}/g; s/__BUILD__/${GITHUB_RUN_NUMBER}/g" dist/index.html
+          echo "COMMIT=${COMMIT}" >> "$GITHUB_ENV"
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Instalar Netlify CLI
+        run: npm install -g netlify-cli@23.12.3
+
+      - name: Deploy na Netlify
+        id: publicar
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID_MAIN }}
+        run: |
+          if [ -z "$NETLIFY_AUTH_TOKEN" ] || [ -z "$NETLIFY_SITE_ID" ]; then
+            echo "::error::Secrets NETLIFY_AUTH_TOKEN e/ou NETLIFY_SITE_ID_MAIN não configurados"
+            exit 1
+          fi
+          netlify deploy \
+            --site="$NETLIFY_SITE_ID" \
+            --auth="$NETLIFY_AUTH_TOKEN" \
+            --dir=dist --prod --no-build --json \
+            --message="main - commit ${COMMIT} - execução #${GITHUB_RUN_NUMBER}" > deploy.json
+          echo "url=$(jq -r '.url // empty' deploy.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Registrar execução
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+          URL: ${{ steps.publicar.outputs.url }}
+        run: |
+          {
+            echo "### Deploy da branch main"
+            echo "- Status: ${STATUS}"
+            echo "- Commit: \`${COMMIT:-?}\`"
+            echo "- Acionado por: @${GITHUB_ACTOR}"
+            echo "- URL: ${URL:-não disponível}"
+          } >> "$GITHUB_STEP_SUMMARY"
